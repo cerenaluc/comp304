@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@ struct command_t {
   char *redirects[3];     // in/out redirection
   struct command_t *next; // for piping
 };
+
 
 /**
  * Prints a command struct
@@ -305,39 +307,120 @@ int prompt(struct command_t *command) {
   tcsetattr(STDIN_FILENO, TCSANOW, &backup_termios);
   return SUCCESS;
 }
-//for part1
+
+//for part1 I used execvp as it is indicated
 static char *resolve_in_path(const char *cmd) {
   if (strchr(cmd, '/')) {
-    if (access(cmd, X_OK) == 0) return strdup(cmd);
-        return NULL;
+    if (access(cmd, X_OK) == 0)
+      return strdup(cmd);
+    return NULL;
   }
   const char *path_env = getenv("PATH");
-  if (!path_env) return NULL;
+  if (!path_env)
+    return NULL;
   char *paths = strdup(path_env);
-  if (!paths) return NULL;
   char *saveptr = NULL;
   char *dir = strtok_r(paths, ":", &saveptr);
   while (dir) {
-     char full[1024];
-     snprintf(full, sizeof(full), "%s/%s", dir, cmd);
-        if (access(full, X_OK) == 0) {
-            free(paths);
-            return strdup(full);
-        }
-        dir = strtok_r(NULL, ":", &saveptr);
+    char full[1024];
+    snprintf(full, sizeof(full), "%s/%s", dir, cmd);
+    if (access(full, X_OK) == 0) {
+      free(paths);
+      return strdup(full);
     }
+    dir = strtok_r(NULL, ":", &saveptr);
+  }
   free(paths);
   return NULL;
 }
 
-//for clean'ng child processes
+//for cleaning child processes
 static void cln_background_children(void) {
     while (waitpid(-1, NULL, WNOHANG) > 0) {
     }
 }
 
+
+//for part2 I implemented this for redirections
+static int apply_redirections(struct command_t *cmd) {
+  if (cmd->redirects[0]) { // < input
+    int fd = open(cmd->redirects[0], O_RDONLY);
+    if (fd < 0) { perror(cmd->redirects[0]); return -1; }
+    dup2(fd, STDIN_FILENO);
+    close(fd);
+  }
+  if (cmd->redirects[1]) { // > output truncate
+    int fd = open(cmd->redirects[1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { perror(cmd->redirects[1]); return -1; }
+    dup2(fd, STDOUT_FILENO);
+    close(fd);
+  }
+  if (cmd->redirects[2]) { // >> output append
+    int fd = open(cmd->redirects[2], O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) { perror(cmd->redirects[2]); return -1; }
+    dup2(fd, STDOUT_FILENO);
+    close(fd);
+  }
+  return 0;
+}
+
+//part2 I implemented to run a pipiline recursively
+//each call forks the left command and passes pipe read end to the right side
+static pid_t exec_pipeline(struct command_t *cmd) {
+   if (!cmd->next) {
+    char *fullpath = resolve_in_path(cmd->name);
+    if (!fullpath) {
+      printf("-%s: %s: command not found\n", sysname, cmd->name);
+      return -1;
+    }
+    pid_t pid = fork();
+    if (pid == 0) { // child
+      if (apply_redirections(cmd) != 0) exit(1);
+      execv(fullpath, cmd->args);
+      printf("-%s: %s: command not found\n", sysname, cmd->name);
+      free(fullpath);
+      exit(127);
+    }
+    free(fullpath);
+    return pid;
+  }
+
+  int pipefd[2];
+  pipe(pipefd);
+  char *fullpath = resolve_in_path(cmd->name);
+  if (!fullpath) {
+    printf("-%s: %s: command not found\n", sysname, cmd->name);
+    close(pipefd[0]); close(pipefd[1]);
+    return -1;
+  }
+  pid_t pid_left = fork();
+  if (pid_left == 0) {
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[1]);
+    if (apply_redirections(cmd) != 0) exit(1);
+    execv(fullpath, cmd->args);
+    printf("-%s: %s: command not found\n", sysname, cmd->name);
+    free(fullpath);
+    exit(127);
+  }
+  free(fullpath);
+  close(pipefd[1]); 
+
+  pid_t pid_right = fork();
+  if (pid_right == 0) { 
+    dup2(pipefd[0], STDIN_FILENO);
+    close(pipefd[0]);
+    pid_t result = exec_pipeline(cmd->next);
+    if (result > 0) waitpid(result, NULL, 0);
+    exit(0);
+  }
+  close(pipefd[0]);
+  waitpid(pid_left, NULL, 0);
+  return pid_right;
+}
+
 int process_command(struct command_t *command) {
-  cln_background_children();
   int r;
   if (strcmp(command->name, "") == 0)
     return SUCCESS;
@@ -355,6 +438,11 @@ int process_command(struct command_t *command) {
   }
 
   pid_t pid = fork();
+  // I added fork error check
+  if (pid < 0) {
+    perror("fork");
+    return SUCCESS;
+  }
   if (pid == 0) // child
   {
     /// This shows how to do exec with environ (but is not available on MacOs)
@@ -367,27 +455,38 @@ int process_command(struct command_t *command) {
 
     // TODO: do your own exec with path resolving using execv()
     // do so by replacing the execvp call below
-   //  execvp(command->name, command->args); // exec+args+path
-   //  printf("-%s: %s: command not found\n", sysname, command->name);
+    // execvp(command->name, command->args); // exec+args+path
+    // printf("-%s: %s: command not found\n", sysname, command->name);
+    // exit(127);
+
+    
+    if (command->next) {
+      pid_t pipe_pid = exec_pipeline(command);
+      if (pipe_pid > 0) waitpid(pipe_pid, NULL, 0);
+      exit(0);
+    }
+    // I added path resolving with execv 
     char *fullpath = resolve_in_path(command->name);
     if (!fullpath) {
-    	printf("-%s: %s: command not found\n", sysname, command->name);
-   	exit(127);
-    }  
+      printf("-%s: %s: command not found\n", sysname, command->name);
+      exit(127);
+    }
+    if (apply_redirections(command) != 0) { free(fullpath); exit(1); }
     execv(fullpath, command->args);
-    printf("-%s: %s: %s\n", sysname, command->name, strerror(errno));
+    printf("-%s: %s: command not found\n", sysname, command->name);
     free(fullpath);
     exit(127);
-  
-     } else {
+  } else {
     // TODO: implement background processes here
-	if (command->background) {
-	        return SUCCESS;
-         } else {    
-                wait(0); // wait for child process to finish
-    		return SUCCESS;
-  	}
-}
+    // wait(0); // wait for child process to finish
+
+    // I added: reap background children and background support
+    cln_background_children();
+    if (command->background)
+      return SUCCESS;
+    waitpid(pid, NULL, 0);
+    return SUCCESS;
+  }
 }
 
 int main() {
