@@ -364,6 +364,118 @@ static int apply_redirections(struct command_t *cmd) {
   return 0;
 }
 
+//for 3a  I implemented this as a builtin cut command
+static int builtin_cut(struct command_t *command) {
+  char delimiter_char = '\t';
+  int requested_fields[500];
+  int number_of_fields = 0;
+  int found_f_option = 0;
+  int arg_index = 1;
+  while (arg_index < command->arg_count - 1) {
+    char *current_arg = command->args[arg_index];
+    if (current_arg == NULL) {
+      break;
+    }
+    if (strcmp(current_arg, "-d") == 0 || strcmp(current_arg, "--delimiter") == 0) {
+      int next_index = arg_index + 1;
+      if (next_index < command->arg_count - 1 && command->args[next_index] != NULL) {
+        delimiter_char = command->args[next_index][0];
+        arg_index += 2; 
+        continue;
+      }
+    }
+    if (current_arg[0] == '-' && current_arg[1] == 'd' && current_arg[2] != '\0') {
+      delimiter_char = current_arg[2];
+      arg_index++;
+      continue;
+    }
+    if (strcmp(current_arg, "-f") == 0 || strcmp(current_arg, "--fields") == 0) {
+      int next_index = arg_index + 1;
+      if (next_index < command->arg_count - 1 && command->args[next_index] != NULL) {
+        char *fields_copy = strdup(command->args[next_index]);
+        char *one_field = strtok(fields_copy, ",");
+        while (one_field != NULL) {
+          int field_num = atoi(one_field);
+          if (number_of_fields < 500) {
+            requested_fields[number_of_fields] = field_num;
+            number_of_fields++;
+          }
+          one_field = strtok(NULL, ",");
+        }
+        free(fields_copy);
+        found_f_option = 1;
+        arg_index += 2;
+        continue;
+      }
+    }
+    if (current_arg[0] == '-' && current_arg[1] == 'f' && current_arg[2] != '\0') {
+      char *fields_copy = strdup(current_arg + 2);
+      char *one_field = strtok(fields_copy, ",");
+      while (one_field != NULL) {
+        int field_num = atoi(one_field);
+        if (number_of_fields < 500) {
+          requested_fields[number_of_fields] = field_num;
+          number_of_fields++;
+        }
+        one_field = strtok(NULL, ",");
+      }
+      free(fields_copy);
+      found_f_option = 1;
+      arg_index++;
+      continue;
+    }
+
+    arg_index++;
+  }
+  if (found_f_option == 0 || number_of_fields == 0) {
+    fprintf(stderr, "-%s: cut: need to provide -f with field numbers\n", sysname);
+    return 1;
+  }
+  char line_buffer[4096];
+
+  while (fgets(line_buffer, sizeof(line_buffer), stdin) != NULL) {
+    int line_length = strlen(line_buffer);
+    if (line_length > 0 && line_buffer[line_length - 1] == '\n') {
+      line_buffer[line_length - 1] = '\0';
+      line_length--;
+    }
+
+  
+    char line_copy[4096];
+    strcpy(line_copy, line_buffer);
+    char *field_pointers[500];
+    int total_fields_in_line = 0;
+    char delim_string[2];
+    delim_string[0] = delimiter_char;
+    delim_string[1] = '\0';
+
+    char *current_token = strtok(line_copy, delim_string);
+    while (current_token != NULL && total_fields_in_line < 500) {
+      field_pointers[total_fields_in_line] = current_token;
+      total_fields_in_line++;
+      current_token = strtok(NULL, delim_string);
+    }
+
+    int fi = 0;
+    while (fi < number_of_fields) {
+      int array_index = requested_fields[fi] - 1;
+      if (array_index >= 0 && array_index < total_fields_in_line) {
+        printf("%s", field_pointers[array_index]);
+      }
+      if (fi < number_of_fields - 1) {
+        printf("%c", delimiter_char);
+      }
+
+      fi++;
+    }
+    
+    printf("\n");
+  }
+  return 0;
+}
+
+   
+
 //part2 I implemented to run a pipiline recursively
 //each call forks the left command and passes pipe read end to the right side
 static pid_t exec_pipeline(struct command_t *cmd) {
@@ -376,6 +488,10 @@ static pid_t exec_pipeline(struct command_t *cmd) {
     pid_t pid = fork();
     if (pid == 0) { // child
       if (apply_redirections(cmd) != 0) exit(1);
+      if (strcmp(cmd->name, "cut") == 0) {
+        free(fullpath);
+        exit(builtin_cut(cmd));
+      }
       execv(fullpath, cmd->args);
       printf("-%s: %s: command not found\n", sysname, cmd->name);
       free(fullpath);
@@ -465,6 +581,9 @@ int process_command(struct command_t *command) {
       if (pipe_pid > 0) waitpid(pipe_pid, NULL, 0);
       exit(0);
     }
+    if (strcmp(command->name, "cut") == 0) {
+      exit(builtin_cut(command));
+    }
     // I added path resolving with execv 
     char *fullpath = resolve_in_path(command->name);
     if (!fullpath) {
@@ -480,7 +599,7 @@ int process_command(struct command_t *command) {
     // TODO: implement background processes here
     // wait(0); // wait for child process to finish
 
-    // I added: reap background children and background support
+    // I added reap background children and background support
     cln_background_children();
     if (command->background)
       return SUCCESS;
