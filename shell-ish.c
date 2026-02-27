@@ -346,21 +346,25 @@ static void cln_background_children(void) {
 
 //for part2 I implemented this for redirections
 static int apply_redirections(struct command_t *cmd) {
-  if (cmd->redirects[0]) { // < input
-    int fd = open(cmd->redirects[0], O_RDONLY);
-    if (fd < 0) { perror(cmd->redirects[0]); return -1; }
+  char safe_path[2048];
+  if (cmd->redirects[0]) {
+    snprintf(safe_path, sizeof(safe_path), "%s", cmd->redirects[0]);
+    int fd = open(safe_path, O_RDONLY);
+    if (fd < 0) { perror(safe_path); return -1; }
     dup2(fd, STDIN_FILENO);
     close(fd);
   }
-  if (cmd->redirects[1]) { // > output truncate
-    int fd = open(cmd->redirects[1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) { perror(cmd->redirects[1]); return -1; }
+  if (cmd->redirects[1]) {
+    snprintf(safe_path, sizeof(safe_path), "%s", cmd->redirects[1]);
+    int fd = open(safe_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { perror(safe_path); return -1; }
     dup2(fd, STDOUT_FILENO);
     close(fd);
   }
-  if (cmd->redirects[2]) { // >> output append
-    int fd = open(cmd->redirects[2], O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) { perror(cmd->redirects[2]); return -1; }
+  if (cmd->redirects[2]) {
+    snprintf(safe_path, sizeof(safe_path), "%s", cmd->redirects[2]);
+    int fd = open(safe_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) { perror(safe_path); return -1; }
     dup2(fd, STDOUT_FILENO);
     close(fd);
   }
