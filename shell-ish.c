@@ -502,7 +502,176 @@ static int builtin_chatroom(struct command_t *command) {
 }
 
 
+// I implemented this as a builtin bookmark command for part 3c
+// it lets user save directory paths with a name and go to them quickly
+// bookmarks are stored in ~/.shellish_bookmarks file  and each line in the file has the format: name:path
+static int builtin_bookmark(struct command_t *command) {
 
+  // I check if user gave a subcommand
+  if (command->arg_count < 3) {
+    fprintf(stderr, "-%s: bookmark: usage: bookmark <add|list|go|remove> ...\n", sysname);
+    return 1;
+  }
+  char *subcommand = command->args[1];
+  char bookmarks_file[1024];
+  char *home_dir = getenv("HOME");
+  if (home_dir == NULL) {
+    fprintf(stderr, "-%s: bookmark: could not find HOME directory\n", sysname);
+    return 1;
+  }
+  snprintf(bookmarks_file, sizeof(bookmarks_file), "%s/.shellish_bookmarks", home_dir);
+  
+  // handling list subcommand it reads the bookmarks file and prints all saved bookmarks
+  if (strcmp(subcommand, "list") == 0) {
+    FILE *file = fopen(bookmarks_file, "r");
+    if (file == NULL) {
+      printf("no bookmarks saved yet\n");
+      return 0;
+    }
+    char line[2048];
+    int count = 1;
+    printf("saved bookmarks:\n");
+    while (fgets(line, sizeof(line), file) != NULL) {
+      int len = strlen(line);
+      if (len > 0 && line[len - 1] == '\n') {
+        line[len - 1] = '\0';
+      }
+      printf("  %d. %s\n", count, line);
+      count++;
+    }
+    fclose(file);
+    return 0;
+  }
+ 
+
+  // handling add subcommand  it saves a new bookmark with the given name and path
+  if (strcmp(subcommand, "add") == 0) {
+    if (command->arg_count < 5) {
+      fprintf(stderr, "-%s: bookmark: usage: bookmark add <name> <path>\n", sysname);
+      return 1;
+    }
+    char *bookmark_name = command->args[2];
+    char *bookmark_path = command->args[3];
+
+    FILE *file = fopen(bookmarks_file, "a");
+    if (file == NULL) {
+      fprintf(stderr, "-%s: bookmark: could not open bookmarks file\n", sysname);
+      return 1;
+    }
+    fprintf(file, "%s:%s\n", bookmark_name, bookmark_path);
+    fclose(file);
+    printf("bookmark '%s' saved for path '%s'\n", bookmark_name, bookmark_path);
+    return 0;
+  }
+
+  // handling go subcommand it finds the bookmark by name and changes directory to its path
+  if (strcmp(subcommand, "go") == 0) {
+    if (command->arg_count < 4) {
+      fprintf(stderr, "-%s: bookmark: usage: bookmark go <name>\n", sysname);
+      return 1;
+    }
+    char *bookmark_name = command->args[2];
+
+    FILE *file = fopen(bookmarks_file, "r");
+    if (file == NULL) {
+      fprintf(stderr, "-%s: bookmark: no bookmarks saved yet\n", sysname);
+      return 1;
+    }
+
+    char line[2048];
+    int found = 0;
+    while (fgets(line, sizeof(line), file) != NULL) {
+      int len = strlen(line);
+      if (len > 0 && line[len - 1] == '\n') {
+        line[len - 1] = '\0';
+      }
+      char *colon = strchr(line, ':');
+      if (colon == NULL) continue;
+
+    
+      *colon = '\0';
+      char *saved_name = line;
+      char *saved_path = colon + 1;
+
+      if (strcmp(saved_name, bookmark_name) == 0) {
+        int cd_result = chdir(saved_path);
+        if (cd_result < 0) {
+          fprintf(stderr, "-%s: bookmark: could not go to '%s': %s\n", sysname, saved_path, strerror(errno));
+          fclose(file);
+          return 1;
+        }
+        printf("moved to '%s'\n", saved_path);
+        found = 1;
+        break;
+      }
+    }
+    fclose(file);
+
+    if (found == 0) {
+      fprintf(stderr, "-%s: bookmark: '%s' not found\n", sysname, bookmark_name);
+      return 1;
+    }
+    return 0;
+  }
+
+  // handling remove subcommand  it deletes a bookmark by name from the file
+  if (strcmp(subcommand, "remove") == 0) {
+    if (command->arg_count < 4) {
+      fprintf(stderr, "-%s: bookmark: usage: bookmark remove <name>\n", sysname);
+      return 1;
+    }
+    char *bookmark_name = command->args[2];
+
+    FILE *file = fopen(bookmarks_file, "r");
+    if (file == NULL) {
+      fprintf(stderr, "-%s: bookmark: no bookmarks saved yet\n", sysname);
+      return 1;
+    }
+    char all_lines[100][2048];
+    int line_count = 0;
+    while (fgets(all_lines[line_count], sizeof(all_lines[line_count]), file) != NULL) {
+      line_count++;
+    }
+    fclose(file);
+    FILE *new_file = fopen(bookmarks_file, "w");
+    if (new_file == NULL) {
+      fprintf(stderr, "-%s: bookmark: could not update bookmarks file\n", sysname);
+      return 1;
+    }
+
+    int removed = 0;
+    for (int i = 0; i < line_count; i++) {
+      char line_copy[2048];
+      strcpy(line_copy, all_lines[i]);
+
+      int len = strlen(line_copy);
+      if (len > 0 && line_copy[len - 1] == '\n') {
+        line_copy[len - 1] = '\0';
+      }
+
+      char *colon = strchr(line_copy, ':');
+      if (colon != NULL) {
+        *colon = '\0';
+        if (strcmp(line_copy, bookmark_name) == 0) {
+          removed = 1;
+          continue;
+        }
+      }
+      fprintf(new_file, "%s", all_lines[i]);
+    }
+    fclose(new_file);
+
+    if (removed == 1) {
+      printf("bookmark '%s' removed\n", bookmark_name);
+    } else {
+      fprintf(stderr, "-%s: bookmark: '%s' not found\n", sysname, bookmark_name);
+    }
+    return 0;
+  }
+
+  fprintf(stderr, "-%s: bookmark: unknown subcommand '%s'\n", sysname, subcommand);
+  return 1;
+}
 
 
 //for 3a  I implemented this as a builtin cut command
@@ -636,6 +805,11 @@ static pid_t exec_pipeline(struct command_t *cmd) {
          exit(builtin_chatroom(cmd));
       }
 
+      if (strcmp(cmd->name, "bookmark") == 0) {
+         free(fullpath);
+         exit(builtin_bookmark(cmd));
+      }
+
       if (strcmp(cmd->name, "cut") == 0) {
         free(fullpath);
         exit(builtin_cut(cmd));
@@ -703,6 +877,10 @@ int process_command(struct command_t *command) {
 
   if (strcmp(command->name, "chatroom") == 0) {
      exit(builtin_chatroom(command));
+  }
+ 
+  if (strcmp(command->name, "bookmark") == 0) {
+      return builtin_bookmark(command);
   }
 
   pid_t pid = fork();
