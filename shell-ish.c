@@ -7,6 +7,9 @@
 #include <sys/wait.h>
 #include <termios.h> // termios, TCSANOW, ECHO, ICANON
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
 const char *sysname = "shellish";
 
 enum return_codes {
@@ -364,6 +367,144 @@ static int apply_redirections(struct command_t *cmd) {
   return 0;
 }
 
+
+//for 3b  I implemented this as a builtin chatroom command
+static int builtin_chatroom(struct command_t *command) {
+
+  if (command->arg_count < 4) {
+    fprintf(stderr, "-%s: chatroom: usage: chatroom <roomname> <username>\n", sysname);
+    return 1;
+  }
+  char *room_name = command->args[1];
+  char *user_name = command->args[2];
+  char room_path[1024];
+  snprintf(room_path, sizeof(room_path), "/tmp/chatroom-%s", room_name);
+ 
+  // I created the room 
+  int mkdir_result = mkdir(room_path, 0777);
+  if (mkdir_result < 0 && errno != EEXIST) {
+    fprintf(stderr, "-%s: chatroom: could not create room folder\n", sysname);
+    return 1;
+  }
+  char user_fifo_path[1024];
+  snprintf(user_fifo_path, sizeof(user_fifo_path), "%s/%s", room_path, user_name);
+ 
+ // I created the user's FIFO
+  int mkfifo_result = mkfifo(user_fifo_path, 0666);
+  if (mkfifo_result < 0 && errno != EEXIST) {
+    fprintf(stderr, "-%s: chatroom: could not create user pipe\n", sysname);
+    return 1;
+  }
+ // I open my own FIFO for reading 
+  int my_read_fd = open(user_fifo_path, O_RDONLY | O_NONBLOCK);
+  if (my_read_fd < 0) {
+    fprintf(stderr, "-%s: chatroom: could not open my pipe for reading\n", sysname);
+    return 1;
+  }
+ 
+ // I also open my own FIFO
+  int my_write_fd = open(user_fifo_path, O_WRONLY | O_NONBLOCK);
+  if (my_write_fd < 0) {
+    close(my_read_fd);
+    fprintf(stderr, "-%s: chatroom: could not open my pipe for writing\n", sysname);
+    return 1;
+  }
+
+  printf("Welcome to %s!\n", room_name);
+  fflush(stdout);
+
+  int need_to_show_prompt = 1;
+
+  while (1) {
+    if (need_to_show_prompt) {
+      printf("[%s] %s > ", room_name, user_name);
+      fflush(stdout);
+      need_to_show_prompt = 0;
+    }
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(STDIN_FILENO, &read_fds);
+    FD_SET(my_read_fd, &read_fds);
+
+    int max_fd = my_read_fd;
+    if (STDIN_FILENO > max_fd) {
+      max_fd = STDIN_FILENO;
+    }
+
+    int select_result = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
+    if (select_result < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+
+    // I checked if there are incoming messages in my FIFO
+    if (FD_ISSET(my_read_fd, &read_fds)) {
+      char incoming_msg[1024];
+      while (1) {
+        int bytes_read = read(my_read_fd, incoming_msg, sizeof(incoming_msg) - 1);
+        if (bytes_read > 0) {
+          incoming_msg[bytes_read] = '\0';
+          printf("\n%s", incoming_msg);
+          fflush(stdout);
+          need_to_show_prompt = 1;
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (FD_ISSET(STDIN_FILENO, &read_fds)) {
+      char input_buffer[1024];
+      if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL) break;
+
+      int input_len = strlen(input_buffer);
+      if (input_len > 0 && input_buffer[input_len - 1] == '\n') {
+        input_buffer[input_len - 1] = '\0';
+        input_len--;
+      }
+
+      if (strcmp(input_buffer, "exit") == 0) break;
+
+     char formatted_message[2048];
+     snprintf(formatted_message, sizeof(formatted_message), "[%s] %s: %s\n", room_name, user_name, input_buffer);
+  
+     DIR *room_dir = opendir(room_path);
+      if (room_dir != NULL) {
+        struct dirent *dir_entry;
+        while ((dir_entry = readdir(room_dir)) != NULL) {
+          if (strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) continue;
+          if (strcmp(dir_entry->d_name, user_name) == 0) continue;
+
+          char other_fifo_path[2048];
+          snprintf(other_fifo_path, sizeof(other_fifo_path), "%s/%s", room_path, dir_entry->d_name);
+
+          pid_t child_pid = fork();
+          if (child_pid == 0) {
+            int other_fd = open(other_fifo_path, O_WRONLY | O_NONBLOCK);
+            if (other_fd >= 0) {
+              write(other_fd, formatted_message, strlen(formatted_message));
+              close(other_fd);
+            }
+            exit(0);
+          } else if (child_pid > 0) {
+            waitpid(child_pid, NULL, 0);
+          }
+        }
+        closedir(room_dir);
+      }
+      need_to_show_prompt = 1;
+    }
+  }
+
+  close(my_write_fd);
+  close(my_read_fd);
+  return 0;
+}
+
+
+
+
+
 //for 3a  I implemented this as a builtin cut command
 static int builtin_cut(struct command_t *command) {
   char delimiter_char = '\t';
@@ -488,6 +629,13 @@ static pid_t exec_pipeline(struct command_t *cmd) {
     pid_t pid = fork();
     if (pid == 0) { // child
       if (apply_redirections(cmd) != 0) exit(1);
+     
+      //chatroom control
+      if (strcmp(cmd->name, "chatroom") == 0) {
+         free(fullpath);
+         exit(builtin_chatroom(cmd));
+      }
+
       if (strcmp(cmd->name, "cut") == 0) {
         free(fullpath);
         exit(builtin_cut(cmd));
@@ -551,6 +699,10 @@ int process_command(struct command_t *command) {
         printf("-%s: %s: %s\n", sysname, command->name, strerror(errno));
       return SUCCESS;
     }
+  }
+
+  if (strcmp(command->name, "chatroom") == 0) {
+     exit(builtin_chatroom(command));
   }
 
   pid_t pid = fork();
